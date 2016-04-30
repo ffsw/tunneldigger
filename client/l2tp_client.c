@@ -1142,6 +1142,10 @@ int broker_selector_usage(broker_cfg *brokers, int broker_cnt, int ready_cnt)
         best = i;
       }
     }
+    
+    if (brokers[best].ctx->standby_available == 0) {
+      return broker_selector_first_available(brokers, broker_cnt, ready_cnt);
+    }
 
     brokers[best].ctx->standby_only = 0;
     brokers[best].ctx->state = STATE_GET_COOKIE;
