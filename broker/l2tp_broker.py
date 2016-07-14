@@ -962,8 +962,9 @@ class TunnelManager(object):
 
     val = int( 1.0 * (len(self.tunnels) / (self.max_tunnels * 1.0)) * 65535)
     val = hex(val)[2:]
-    if len(val)  % 2 == 1:
+    while len(val) < 4:
       val = '0' + val
+    if len(val) > 4: val = 'ffff' # this should not be possible
 
     return binascii.unhexlify(val)
 
