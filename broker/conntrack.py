@@ -37,6 +37,8 @@ except OSError:
     # Support OpenWRT.
     libc = CDLL('libc.so.0')
 
+nfct.nfct_new.restype = c_void_p
+nfct.nfct_open.restype = c_void_p
 
 NFCT_CALLBACK = CFUNCTYPE(c_int, c_int, c_void_p, c_void_p)
 
@@ -239,7 +241,7 @@ class ConnectionManager(object):
         dport: destination port
         '''
 
-        ct = nfct.nfct_new()
+        ct = c_void_p(nfct.nfct_new())
         if not ct:
             raise ConntrackError("nfct_new failed!")
 
@@ -263,7 +265,7 @@ class ConnectionManager(object):
         nfct.nfct_set_attr_u16(ct, ATTR_PORT_SRC, libc.htons(sport))
         nfct.nfct_set_attr_u16(ct, ATTR_PORT_DST, libc.htons(dport))
 
-        h = nfct.nfct_open(CONNTRACK, 0)
+        h = c_void_p(nfct.nfct_open(CONNTRACK, 0))
         if not h:
             raise ConntrackError("nfct_open failed!")
 
@@ -276,7 +278,7 @@ class ConnectionManager(object):
 
     def killall(self, proto = None, src = None, dst = None, sport = None, dport = None):
         '''Removes specified conntrack entries.'''
-        tct = nfct.nfct_new()
+        tct = c_void_p(nfct.nfct_new())
         if not tct:
             raise ConntrackError("nfct_new failed!")
 
@@ -302,7 +304,7 @@ class ConnectionManager(object):
         if dport:
             nfct.nfct_set_attr_u16(tct, ATTR_PORT_DST, libc.htons(dport))
 
-        kh = nfct.nfct_open(CONNTRACK, 0)
+        kh = c_void_p(nfct.nfct_open(CONNTRACK, 0))
 
         if not kh:
             libc.perror("nfct_open")
@@ -310,6 +312,7 @@ class ConnectionManager(object):
 
         @NFCT_CALLBACK
         def cb(type, ct, data):
+            ct = c_void_p(ct)
             if not nfct.nfct_cmp(tct, ct, NFCT_CMP_ALL | NFCT_CMP_MASK):
                 return NFCT_CB_CONTINUE
 
@@ -317,7 +320,7 @@ class ConnectionManager(object):
             nfct.nfct_query(kh, NFCT_Q_DESTROY, ct)
             return NFCT_CB_CONTINUE
 
-        h = nfct.nfct_open(CONNTRACK, 0)
+        h = c_void_p(nfct.nfct_open(CONNTRACK, 0))
 
         if not h:
             nfct.nfct_close(kh)
