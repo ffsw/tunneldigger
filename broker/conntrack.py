@@ -37,6 +37,8 @@ except OSError:
     # Support OpenWRT.
     libc = CDLL('libc.so.0')
 
+nfct.nfct_new.restype = c_void_p
+nfct.nfct_open.restype = c_void_p
 
 NFCT_CALLBACK = CFUNCTYPE(c_int, c_int, c_void_p, c_void_p)
 
@@ -206,44 +208,6 @@ class ConntrackError(Exception):
 class ConntrackQueryFailed(ConntrackError):
   pass
 
-class EventListener(Thread):
-    '''
-    Calling a specified callback function to notify about conntrack events.
-    '''
-
-    def __init__(self, callback,
-                 msg_types=NFCT_T_NEW | NFCT_T_UPDATE | NFCT_T_DESTROY,
-                 output_format=NFCT_O_XML):
-        Thread.__init__(self)
-
-        self.h = nfct.nfct_open(CONNTRACK, NFCT_ALL_CT_GROUPS)
-
-        if self.h == 0:
-            libc.perror("nfct_open")
-            raise ConntrackError("nfct_open failed!")
-
-        buf = create_string_buffer(1024)
-
-        @NFCT_CALLBACK
-        def cb(msg_type, ct, data):
-            nfct.nfct_snprintf(buf, 1024, ct, msg_type, output_format,
-                    NFCT_OF_TIME)
-            callback(buf.value)
-            return NFCT_CB_CONTINUE
-
-        self.cb = cb
-
-        nfct.nfct_callback_register(self.h, msg_types, self.cb, 0)
-
-    def run(self):
-        nfct.nfct_catch.errcheck = nfct_catch_errcheck
-        nfct.nfct_catch(self.h)
-
-    def stop(self):
-        nfct.nfct_close(self.h)
-        self.join()
-
-
 class ConnectionManager(object):
     '''
     Could list all connections, get information about single connection.
@@ -266,99 +230,6 @@ class ConnectionManager(object):
         self.__format = fmt
         self.__family = family
 
-    def list(self):
-        '''Get list of active connections from conntrack.'''
-
-        l = []
-
-        buf = create_string_buffer(1024)
-
-        @NFCT_CALLBACK
-        def cb(type, ct, data):
-            nfct.nfct_snprintf(buf, 1024, ct, type, self.__format,
-                NFCT_OF_TIME)
-            l.append(buf.value)
-            return NFCT_CB_CONTINUE
-
-        h = nfct.nfct_open(CONNTRACK, 0)
-
-        if not h:
-            libc.perror("nfct_open")
-            raise ConntrackError("nfct_open failed!")
-
-        nfct.nfct_callback_register(h, NFCT_T_ALL, cb, 0)
-        ret = nfct.nfct_query(h, NFCT_Q_DUMP, byref(c_int(self.__family)))
-        if ret == -1:
-            libc.perror("nfct_query")
-            nfct.nfct_close(h)
-            raise ConntrackError("nfct_query failed!")
-        nfct.nfct_close(h)
-        return l
-
-    def get(self, proto, src, dst, sport, dport):
-        '''
-        Get information about specified connection.
-
-        proto: IPPROTO_UDP or IPPROTO_TCP
-        src: source ip address
-        dst: destination ip address
-        sport: source port
-        dport: destination port
-        '''
-
-        l = []
-
-        ct = nfct.nfct_new()
-        if not ct:
-            libc.perror("nfct_new")
-            raise ConntrackError("nfct_new failed!")
-
-        nfct.nfct_set_attr_u8(ct, ATTR_L3PROTO, self.__family)
-
-        if self.__family == AF_INET:
-            nfct.nfct_set_attr_u32(ct, ATTR_IPV4_SRC,
-                                   libc.inet_addr(src))
-            nfct.nfct_set_attr_u32(ct, ATTR_IPV4_DST,
-                                   libc.inet_addr(dst))
-        elif self.__family == AF_INET6:
-            nfct.nfct_set_attr_u128(ct, ATTR_IPV6_SRC,
-                                    libc.inet_addr(src))
-            nfct.nfct_set_attr_u128(ct, ATTR_IPV6_DST,
-                                    libc.inet_addr(dst))
-        else:
-            raise ConntrackError("Unsupported protocol family!")
-
-        nfct.nfct_set_attr_u8(ct, ATTR_L4PROTO, proto)
-
-        nfct.nfct_set_attr_u16(ct, ATTR_PORT_SRC, libc.htons(sport))
-        nfct.nfct_set_attr_u16(ct, ATTR_PORT_DST, libc.htons(dport))
-
-        h = nfct.nfct_open(CONNTRACK, 0)
-        if not h:
-            libc.perror("nfct_open")
-            raise ConntrackError("nfct_open failed!")
-
-        buf = create_string_buffer(1024)
-
-        @NFCT_CALLBACK
-        def cb(type, ct, data):
-            nfct.nfct_snprintf(buf, 1024, ct, NFCT_T_UNKNOWN, self.__format,
-                NFCT_OF_SHOW_LAYER3)
-            l.append(buf.value)
-            return NFCT_CB_CONTINUE
-
-        nfct.nfct_callback_register(h, NFCT_T_ALL, cb, 0)
-
-        ret = nfct.nfct_query(h, NFCT_Q_GET, ct)
-
-        if ret == -1:
-            libc.perror("nfct_query")
-            raise ConntrackError("nfct_query failed!")
-
-        nfct.nfct_close(h)
-
-        return l[0]
-
     def kill(self, proto, src, dst, sport, dport, silent_query = True):
         '''
         Delete specified connection.
@@ -370,7 +241,7 @@ class ConnectionManager(object):
         dport: destination port
         '''
 
-        ct = nfct.nfct_new()
+        ct = c_void_p(nfct.nfct_new())
         if not ct:
             raise ConntrackError("nfct_new failed!")
 
@@ -394,7 +265,7 @@ class ConnectionManager(object):
         nfct.nfct_set_attr_u16(ct, ATTR_PORT_SRC, libc.htons(sport))
         nfct.nfct_set_attr_u16(ct, ATTR_PORT_DST, libc.htons(dport))
 
-        h = nfct.nfct_open(CONNTRACK, 0)
+        h = c_void_p(nfct.nfct_open(CONNTRACK, 0))
         if not h:
             raise ConntrackError("nfct_open failed!")
 
@@ -407,7 +278,7 @@ class ConnectionManager(object):
 
     def killall(self, proto = None, src = None, dst = None, sport = None, dport = None):
         '''Removes specified conntrack entries.'''
-        tct = nfct.nfct_new()
+        tct = c_void_p(nfct.nfct_new())
         if not tct:
             raise ConntrackError("nfct_new failed!")
 
@@ -433,7 +304,7 @@ class ConnectionManager(object):
         if dport:
             nfct.nfct_set_attr_u16(tct, ATTR_PORT_DST, libc.htons(dport))
 
-        kh = nfct.nfct_open(CONNTRACK, 0)
+        kh = c_void_p(nfct.nfct_open(CONNTRACK, 0))
 
         if not kh:
             libc.perror("nfct_open")
@@ -441,6 +312,7 @@ class ConnectionManager(object):
 
         @NFCT_CALLBACK
         def cb(type, ct, data):
+            ct = c_void_p(ct)
             if not nfct.nfct_cmp(tct, ct, NFCT_CMP_ALL | NFCT_CMP_MASK):
                 return NFCT_CB_CONTINUE
 
@@ -448,7 +320,7 @@ class ConnectionManager(object):
             nfct.nfct_query(kh, NFCT_Q_DESTROY, ct)
             return NFCT_CB_CONTINUE
 
-        h = nfct.nfct_open(CONNTRACK, 0)
+        h = c_void_p(nfct.nfct_open(CONNTRACK, 0))
 
         if not h:
             nfct.nfct_close(kh)
