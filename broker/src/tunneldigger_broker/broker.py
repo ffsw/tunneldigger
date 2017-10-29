@@ -40,7 +40,7 @@ class TunnelManager(object):
         self.connection_rate_limit = connection_rate_limit
         self.log_ip_addresses = log_ip_addresses
 
-    def create_tunnel(self, broker, address, uuid, remote_tunnel_id):
+    def create_tunnel(self, broker, address, uuid, remote_tunnel_id, request_unique_session_id):
         """
         Creates a new tunnel.
 
@@ -48,6 +48,8 @@ class TunnelManager(object):
         :param address: Remote tunnel endpoint address (host, port) tuple
         :param uuid: Unique tunnel identifier received from the remote host
         :param remote_tunnel_id: Remotely assigned tunnel identifier
+        :param request_unique_session_id: Whether the remote side wants to use unique session IDs
+               (True) or old-style session ID 1 (False).
         :return: True if a tunnel has been created, False otherwise
         """
 
@@ -78,7 +80,8 @@ class TunnelManager(object):
                 address,
                 uuid,
                 tunnel_id,
-                remote_tunnel_id
+                remote_tunnel_id,
+                request_unique_session_id
             )
             tunnel.register(broker.event_loop)
             tunnel.setup_tunnel()

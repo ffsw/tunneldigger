@@ -110,6 +110,15 @@ class HandshakeProtocolMixin(object):
             signature = hmac.HMAC(SECRET_KEY, signed_value, hashlib.sha1).digest()[:6]
             self.write_message(address, CONTROL_TYPE_COOKIE, timestamp + signature)
         elif msg_type == CONTROL_TYPE_PREPARE:
+            # Package format:
+            # 2 bytes protocol time
+            # 6 bytes "cookie", must be the signature we computed above
+            # 1 byte UUID length
+            # N bytes UUID
+            # optionally 4 bytes remote tunnel ID
+            # optionally 1 byte indicating whether the client is requesting a unique (non-1) session ID
+            #                   (In this case, the session ID will be the same as the tunnel ID)
+
             # Verify cookie value.
             timestamp = msg_data[:2]
             signed_value = '%s%s%s' % (address[0], address[1], timestamp)
@@ -121,12 +130,21 @@ class HandshakeProtocolMixin(object):
 
             uuid_len = struct.unpack('!B', msg_data[8])[0]
             uuid = msg_data[9:9 + uuid_len]
+
+            # Parse optional data
+            remote_tunnel_id = None
+            request_unique_session_id = None
             try:
                 remote_tunnel_id = struct.unpack('!I', msg_data[10 + uuid_len:10 + uuid_len + 4])[0]
+                request_unique_session_id = struct.unpack('!B', msg_data[14 + uuid_len])[0]
             except struct.error:
-                remote_tunnel_id = 1
+                if remote_tunnel_id is None:
+                    remote_tunnel_id = 1
+                if request_unique_session_id is None:
+                    # Default value: Old clients do not use a unique session ID
+                    request_unique_session_id = 0
 
-            if not self.create_tunnel(address, uuid, remote_tunnel_id):
+            if not self.create_tunnel(address, uuid, remote_tunnel_id, request_unique_session_id):
                 logger.warning("Failed to create tunnel (%s) while processing prepare request." % uuid)
                 self.write_message(address, CONTROL_TYPE_ERROR)
 
