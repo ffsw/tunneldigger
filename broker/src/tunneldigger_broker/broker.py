@@ -224,14 +224,16 @@ class Broker(protocol.HandshakeProtocolMixin, network.Pollable):
 
         return self.tunnel_manager
 
-    def create_tunnel(self, address, uuid, remote_tunnel_id):
+    def create_tunnel(self, address, uuid, remote_tunnel_id, request_unique_session_id):
         """
         Called when a new tunnel should be created.
 
         :param address: Remote tunnel endpoint address (host, port) tuple
         :param uuid: Unique tunnel identifier received from the remote host
         :param remote_tunnel_id: Remotely assigned tunnel identifier
+        :param request_unique_session_id: Whether the remote side wants to use unique session IDs
+               (True) or old-style session ID 1 (False).
         :return: True if a tunnel has been created, False otherwise
         """
 
-        return self.tunnel_manager.create_tunnel(self, address, uuid, remote_tunnel_id)
+        return self.tunnel_manager.create_tunnel(self, address, uuid, remote_tunnel_id, request_unique_session_id)
