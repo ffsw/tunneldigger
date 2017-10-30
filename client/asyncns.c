@@ -18,14 +18,7 @@
   <http://www.gnu.org/licenses/>.
 ***/
 
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
-
-#define HAVE_STRNDUP 1
-#define HAVE_PTHREAD 1
-#define HAVE_SYS_PRCTL_H 1
-#define HAVE_SETRESUID 1
+#define _GNU_SOURCE
 
 #include <assert.h>
 #include <fcntl.h>
@@ -86,7 +79,7 @@ enum {
 };
 
 struct asyncns {
-    int fds[MESSAGE_FD_MAX];
+    int fds[4];
 
 #ifndef HAVE_PTHREAD
     pid_t workers[MAX_WORKERS];
@@ -191,27 +184,6 @@ typedef union packet {
     res_response_t res_response;
 } packet_t;
 
-#ifndef HAVE_STRNDUP
-
-static char *strndup(const char *s, size_t l) {
-    size_t a;
-    char *n;
-
-    a = strlen(s);
-    if (a > l)
-        a = l;
-
-    if (!(n = malloc(a+1)))
-        return NULL;
-
-    memcpy(n, s, a);
-    n[a] = 0;
-
-    return n;
-}
-
-#endif
-
 #ifndef HAVE_PTHREAD
 
 static int close_allv(const int except_fds[]) {
@@ -223,8 +195,6 @@ static int close_allv(const int except_fds[]) {
     DIR *d;
 
     assert(except_fds);
-
-    /* We ignore FD_CLOEXEC here, since this is called in the child only anyway */
 
     if ((d = opendir("/proc/self/fd"))) {
 
@@ -300,7 +270,7 @@ static int close_allv(const int except_fds[]) {
         for (i = 0; except_fds[i] >= 0; i++)
             if (except_fds[i] == fd) {
                 found = 1;
-                break;
+                continue;
             }
 
         if (found)
@@ -786,21 +756,9 @@ asyncns_t* asyncns_new(unsigned n_proc) {
 
     memset(asyncns->queries, 0, sizeof(asyncns->queries));
 
-#ifdef SOCK_CLOEXEC
-    if (socketpair(PF_UNIX, SOCK_DGRAM|SOCK_CLOEXEC, 0, asyncns->fds) < 0 ||
-        socketpair(PF_UNIX, SOCK_DGRAM|SOCK_CLOEXEC, 0, asyncns->fds+2) < 0) {
-
-        /* Try again, without SOCK_CLOEXEC */
-        if (errno == EINVAL) {
-#endif
-            if (socketpair(PF_UNIX, SOCK_DGRAM, 0, asyncns->fds) < 0 ||
-                socketpair(PF_UNIX, SOCK_DGRAM, 0, asyncns->fds+2) < 0)
-                goto fail;
-#ifdef SOCK_CLOEXEC
-        } else
-            goto fail;
-    }
-#endif
+    if (socketpair(PF_UNIX, SOCK_DGRAM, 0, asyncns->fds) < 0 ||
+        socketpair(PF_UNIX, SOCK_DGRAM, 0, asyncns->fds+2) < 0)
+        goto fail;
 
     for (i = 0; i < MESSAGE_FD_MAX; i++)
         fd_cloexec(asyncns->fds[i]);
