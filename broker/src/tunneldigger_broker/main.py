@@ -79,6 +79,7 @@ tunnel_manager = broker.TunnelManager(
     namespace=config.get('broker', 'namespace'),
     connection_rate_limit=config.getint('broker', 'connection_rate_limit'),
     pmtu_fixed=config.getint('broker', 'pmtu'),
+    require_unique_session_id=config.getboolean('broker', 'require_unique_session_id'),
     log_ip_addresses=config.getboolean('log', 'log_ip_addresses'),
 )
 tunnel_manager.initialize()

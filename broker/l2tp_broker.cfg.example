@@ -21,6 +21,9 @@ namespace=default
 connection_rate_limit=10
 ; Set PMTU to a fixed value.  Use 0 for automatic PMTU discovery.
 pmtu=0
+; Whether this server runs a new kernel (4.13 and various stable series; in particular, 4.9.36) and
+; hence requires unique session IDs
+require_unique_session_id=false
 
 [log]
 ; Verbosity

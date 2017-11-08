@@ -2,6 +2,7 @@ import logging
 import socket
 import time
 import traceback
+import tunnel
 
 import conntrack
 import netfilter.table
@@ -27,6 +28,7 @@ class TunnelManager(object):
         namespace,
         connection_rate_limit,
         pmtu_fixed,
+        require_unique_session_id,
         log_ip_addresses,
     ):
         """
@@ -49,6 +51,7 @@ class TunnelManager(object):
         self.last_tunnel_created = None
         self.connection_rate_limit = connection_rate_limit
         self.pmtu_fixed = pmtu_fixed
+        self.require_unique_session_id = require_unique_session_id
         self.log_ip_addresses = log_ip_addresses
 
     def report_usage(self, client_features):
@@ -58,7 +61,14 @@ class TunnelManager(object):
 
         :param client_features: Client feature flags
         """
-        return int((float(len(self.tunnels)) / self.max_tunnels) * 65535)
+        max_usage = 0xFFFF
+
+        # If we require a unique session ID: report full usage for clients not supporting unique
+        # session IDs.
+        if self.require_unique_session_id and not (client_features & tunnel.FEATURE_UNIQUE_SESSION_ID):
+            return max_usage
+
+        return int((float(len(self.tunnels)) / self.max_tunnels) * max_usage)
 
     def create_tunnel(self, broker, address, uuid, remote_tunnel_id, client_features):
         """
