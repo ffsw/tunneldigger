@@ -2,7 +2,6 @@ import logging
 import socket
 import time
 import traceback
-import tunnel
 
 import conntrack
 import netfilter.table
@@ -65,7 +64,7 @@ class TunnelManager(object):
 
         # If we require a unique session ID: report full usage for clients not supporting unique
         # session IDs.
-        if self.require_unique_session_id and not (client_features & tunnel.FEATURE_UNIQUE_SESSION_ID):
+        if self.require_unique_session_id and not (client_features & protocol.FEATURE_UNIQUE_SESSION_ID):
             return max_usage
 
         return int((float(len(self.tunnels)) / self.max_tunnels) * max_usage)
