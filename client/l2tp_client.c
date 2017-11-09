@@ -1434,9 +1434,6 @@ int main(int argc, char **argv)
       if (main_context->state == STATE_REINIT) {
         syslog(LOG_ERR, "Connection to %s lost.", main_context->broker_hostname);
         break;
-      } else if (main_context->state == STATE_KEEPALIVE) {
-        // We successfully established a connection, this broker is fine.
-        brokers[i].broken = 0;
       }
 
       // If the connection is lost, we start the reconnection timer.
@@ -1452,6 +1449,9 @@ int main(int argc, char **argv)
           syslog(LOG_ERR, "Connection with broker not established after 30 seconds, restarting broker selection...");
           break;
         }
+
+        // We successfully established a connection, this broker is fine.
+        brokers[i].broken = 0;
 
         timer_establish = -1;
         restart_timer = 1;
