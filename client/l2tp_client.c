@@ -116,15 +116,37 @@ enum l2tp_limit_type {
   LIMIT_TYPE_BANDWIDTH_DOWN = 0x01
 };
 
+/* The state machine looks as follows:
+   STATE_REINIT (initial state)
+   -> STATE_RESOLVING
+   When DNS resolving succeeds, we check whether we are the selected broker.  If yes,
+   we go directly to STATE_GET_COOKIE, else we go on:
+   -> STATE_GET_USAGE (sending a usage request every 2s)
+   when we receive usage information
+   -> STATE_IDLE
+
+   Now broker selection is performed; for the selected broker the main loop changes the state so
+   that we go on:
+   -> STATE_GET_COOKIE (sending a cookie request every 2s)
+   when we receive the cookie
+   -> STATE_GET_TUNNEL
+   when we receive the tunnel information
+   -> STATE_KEEPALIVE
+
+   In case of an error, we transition to STATE_REINIT (if it happens early) or STATE_IDLE
+   (if it happens when we are already >= STATE_GET_COOKIE).  The main loop restarts everything
+   once the selected broker enters a state <= STATE_IDLE.
+   For broken brokers, the main loop sets the state to STATE_IDLE to make sure that
+   they do not do anything.
+*/
 enum l2tp_ctrl_state {
+  STATE_REINIT,
+  STATE_RESOLVING,
+  STATE_GET_USAGE,
   STATE_IDLE,
-  STATE_USAGE_SEND,
-  STATE_USAGE_WAIT,
   STATE_GET_COOKIE,
   STATE_GET_TUNNEL,
   STATE_KEEPALIVE,
-  STATE_REINIT,
-  STATE_RESOLVING,
 };
 
 enum l2tp_session_features {
@@ -184,8 +206,7 @@ typedef struct {
   // Tunnel uptime.
   time_t tunnel_up_since;
 
-  // Should the context only be used as a standby context.
-  int standby_only;
+  // Whether we received usage information from the broker
   int standby_available;
 
   // PMTU probing.
@@ -427,7 +448,6 @@ int context_reinitialize(l2tp_context *ctx)
   if (setsockopt(ctx->fd, IPPROTO_IP, IP_MTU_DISCOVER, &val, sizeof(val)) < 0)
     return -1;
 
-  ctx->standby_only = 1;
   ctx->standby_available = 0;
   ctx->keepalive_seqno = 0;
   ctx->reliable_seqno = 0;
@@ -445,8 +465,8 @@ int context_reinitialize(l2tp_context *ctx)
   // Reset relevant timers.
   time_t now = timer_now();
   ctx->timer_usage = now;
-  ctx->timer_cookie = now;
-  ctx->timer_tunnel = now;
+  ctx->timer_cookie = 0; // we want to send the cookie request ASAP
+  ctx->timer_tunnel = 0; // we want to send the tunnel request ASAP
   ctx->timer_keepalive = now;
   ctx->timer_reinit = now;
   ctx->timer_resolving = -1;
@@ -556,14 +576,13 @@ void context_process_control_packet(l2tp_context *ctx)
   // Check packet type.
   switch (type) {
     case CONTROL_TYPE_USAGE: {
-      if (ctx->state == STATE_USAGE_WAIT) {
+      if (ctx->state == STATE_GET_USAGE) {
         // Broker usage information.
         ctx->usage = parse_u16(&buf);
         syslog(LOG_DEBUG, "Broker usage of %s:%s: %u\n", ctx->broker_hostname, ctx->broker_port, ctx->usage);
 
         // Mark the connection as being available for later establishment.
         ctx->standby_available = 1;
-        ctx->timer_cookie = timer_now();
         ctx->state = STATE_IDLE;
       }
       break;
@@ -575,13 +594,8 @@ void context_process_control_packet(l2tp_context *ctx)
 
         memcpy(&ctx->cookie, buf, 8);
 
-        // Mark the connection as being available for later establishment.
-        ctx->standby_available = 1;
-
-        if (ctx->standby_only) // Inactive broker.
-          ctx->state = STATE_IDLE;
-        else // This broker is now active.
-          ctx->state = STATE_GET_TUNNEL;
+        // Proceed building a tunnel.
+        ctx->state = STATE_GET_TUNNEL;
       }
       break;
     }
@@ -594,8 +608,7 @@ void context_process_control_packet(l2tp_context *ctx)
           syslog(LOG_WARNING, "Received error response from broker with errorcode %d!", error_code);
         else
           syslog(LOG_WARNING, "Received error response from broker!");
-        // FIXME: is this really a good idea, to go into get cookie?
-        ctx->state = STATE_GET_COOKIE;
+        ctx->state = STATE_IDLE; // let the main loop restart everything
       } else if (ctx->state == STATE_KEEPALIVE) {
         if (payload_length > 0)
           syslog(LOG_ERR, "Broker sent us a teardown request, closing tunnel with errorcode %d!", error_code);
@@ -617,8 +630,7 @@ void context_process_control_packet(l2tp_context *ctx)
 
         if (context_setup_tunnel(ctx, remote_tunnel_id, server_features) < 0) {
           syslog(LOG_ERR, "Unable to create local L2TP tunnel!");
-          // FIXME: is this really a good idea, to go into get cookie?
-          ctx->state = STATE_GET_COOKIE;
+          ctx->state = STATE_IDLE; // let the main loop restart everything
         } else {
           syslog(LOG_INFO, "Tunnel successfully established.");
           context_call_hook(ctx, "session.up");
@@ -948,8 +960,20 @@ int context_setup_tunnel(l2tp_context *ctx, uint32_t peer_tunnel_id, uint32_t se
   nlmsg_free(msg);
 
   result = nl_wait_for_ack(ctx->nl_sock);
-  if (result < 0)
+  if (result < 0) {
+    // Make sure we delete the tunnel again
+    msg = nlmsg_alloc();
+    genlmsg_put(msg, NL_AUTO_PID, NL_AUTO_SEQ, ctx->nl_family, 0, NLM_F_REQUEST,
+      L2TP_CMD_TUNNEL_DELETE, L2TP_GENL_VERSION);
+
+    nla_put_u32(msg, L2TP_ATTR_CONN_ID, ctx->tunnel_id);
+
+    nl_send_auto_complete(ctx->nl_sock, msg);
+    nlmsg_free(msg);
+    nl_wait_for_ack(ctx->nl_sock);
+
     return -1;
+  }
 
   return 0;
 }
@@ -998,10 +1022,11 @@ void context_close_tunnel(l2tp_context *ctx, uint8_t reason)
   // Notify the broker that the tunnel has been closed.
   context_send_packet(ctx, CONTROL_TYPE_ERROR, (char *) &reason, 1);
 
-  // Call down hook, delete the tunnel and set state to reinit.
+  // Call down hook, delete the tunnel and set state to idle, so that the main loop restarts
+  // everything.
   context_call_hook(ctx, "session.down");
   context_delete_tunnel(ctx);
-  ctx->state = STATE_REINIT;
+  ctx->state = STATE_IDLE;
 }
 
 void broker_select_one(broker_cfg one_broker)
@@ -1073,8 +1098,7 @@ void context_process(l2tp_context *ctx)
             syslog(LOG_ERR, "Failed to connect to remote endpoint - check WAN connectivity!");
             ctx->state = STATE_REINIT;
           } else {
-            ctx->timer_usage = timer_now();
-            ctx->state = STATE_USAGE_SEND;
+            ctx->state = STATE_GET_USAGE;
           }
           asyncns_freeaddrinfo(result);
           ctx->broker_resq = NULL;
@@ -1088,18 +1112,16 @@ void context_process(l2tp_context *ctx)
         ctx->state = STATE_REINIT;
         return;
       }
-      break;
-    }
-    case STATE_USAGE_SEND: {
-        context_send_usage_request(ctx);
-        ctx->timer_usage = timer_now();
-        ctx->state = STATE_USAGE_WAIT;
+      if (ctx->state == STATE_GET_USAGE) {
+        // Deliberate fall-through, let's get the usage ASAP.
+      } else {
         break;
+      }
     }
-    case STATE_USAGE_WAIT: {
-      // Get usage information if available.
+    case STATE_GET_USAGE: {
+      // Get usage information.
       if (is_timeout(&ctx->timer_usage, 2))
-        ctx->state = STATE_GET_COOKIE;
+        context_send_usage_request(ctx);
       break;
     }
     case STATE_GET_COOKIE: {
@@ -1386,6 +1408,10 @@ int main(int argc, char **argv)
     // Make sure all brokers are in sane state.
     for (i = 0; i < broker_cnt; i++) {
       context_reinitialize(brokers[i].ctx);
+      if (brokers[i].broken && brokers[i].broken + 3600 < timer_now()) {
+        // This one broke more than an hour ago, give it another chance.
+        brokers[i].broken = 0;
+      }
       if (!brokers[i].broken)
         working_brokers += 1;
     }
@@ -1398,10 +1424,8 @@ int main(int argc, char **argv)
       if (working_brokers == 0) {
         brokers[i].broken = 0;
       }
-      // Start hostname resolution and connect process.
-      if (!brokers[i].broken) {
-        context_start_connect(brokers[i].ctx);
-      } else {
+      if (brokers[i].broken) {
+        // Inhibit hostname resolution and connect process.
         syslog(LOG_INFO, "Not trying %s:%s again as it broke last time we tried.",
           brokers[i].address, brokers[i].port);
         brokers[i].ctx->state = STATE_IDLE;
@@ -1413,7 +1437,7 @@ int main(int argc, char **argv)
       working_brokers = broker_cnt;
     }
 
-    // Perform broker processing for 20 seconds or until all brokers are ready
+    // Perform broker processing for 5 seconds or until all brokers are ready
     // (whichever is shorter); since all contexts are in standby mode, all
     // available connections will be stuck in GET_COOKIE state.
     time_t timer_collect = timer_now();
@@ -1429,7 +1453,7 @@ int main(int argc, char **argv)
         ready_cnt += brokers[i].ctx->standby_available ? 1 : 0;
       }
 
-      if (ready_cnt == working_brokers || is_timeout(&timer_collect, 20))
+      if (ready_cnt == working_brokers || is_timeout(&timer_collect, 5))
         break;
 
       // First available broker just use the first one available.
@@ -1449,46 +1473,44 @@ int main(int argc, char **argv)
       brokers[i].port);
 
     // Activate the broker.
-    main_context->standby_only = 0;
     main_context->state = STATE_GET_COOKIE;
 
     // Initially, we mark this broker as broken.  We will remove this mark after establishing
     // a connection.  We only want to consider a broker as broker if the initial connection fails;
     // disconnecting later (e.g. because the broker got restarted) is fine.
-    brokers[i].broken = 1;
+    brokers[i].broken = timer_now();
 
     // Perform processing on the main context; if the connection fails and does
-    // not recover after 30 seconds, restart the broker selection process.
-    int restart_timer = 0;
+    // not recover after 15 seconds, restart the broker selection process.
     time_t timer_establish = timer_now();
     for (;;) {
       broker_select_one(brokers[i]);
       context_process(main_context);
 
-      if (main_context->state == STATE_REINIT) {
+      if (main_context->state <= STATE_IDLE) {
+        // We switched back to one of the early states.
         syslog(LOG_ERR, "Connection to %s lost.", main_context->broker_hostname);
         break;
-      } else if (main_context->state == STATE_KEEPALIVE) {
-        // We successfully established a connection, this broker is fine.
-        brokers[i].broken = 0;
       }
 
       // If the connection is lost, we start the reconnection timer.
-      if (restart_timer && main_context->state != STATE_KEEPALIVE) {
+      // Hitting this code path should not be possible, but lets play safe.
+      if (timer_establish < 0 && main_context->state != STATE_KEEPALIVE) {
         timer_establish = timer_now();
-        restart_timer = 0;
       }
 
-      // After 30 seconds, we check if the tunnel has been established.
-      if (is_timeout(&timer_establish, 30)) {
+      // After 15 seconds, we check if the tunnel has been established.
+      if (is_timeout(&timer_establish, 15)) {
         if (main_context->state != STATE_KEEPALIVE) {
           // Tunnel is not established yet, skip to the next broker.
-          syslog(LOG_ERR, "Connection with broker not established after 30 seconds, restarting broker selection...");
+          syslog(LOG_ERR, "Connection with broker not established after 15 seconds, restarting broker selection...");
           break;
         }
 
+        // We successfully established a connection, this broker is fine.
+        brokers[i].broken = 0;
+
         timer_establish = -1;
-        restart_timer = 1;
       }
     }
 
